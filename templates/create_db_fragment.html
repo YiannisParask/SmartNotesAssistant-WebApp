@@ -1,0 +1,11 @@
+{% if status == 'success' %}
+<div class="db-status-success">
+  Imported {{ count }} chunks from <code>{{ data_path }}</code> into Milvus at <code>{{ milvus_uri }}</code>.
+</div>
+{% elif status == 'error' %}
+<div class="db-status-error">
+  Failed to import from <code>{{ data_path }}</code> ({{ error }}).
+</div>
+{% else %}
+<div class="db-status-pending">Processing...</div>
+{% endif %}
