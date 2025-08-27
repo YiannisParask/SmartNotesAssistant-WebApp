@@ -14,9 +14,11 @@ or (production example):
 from __future__ import annotations
 
 import os
+from threading import Lock
 from typing import cast
-from flask import Flask, render_template, request, abort
+
 import torch
+from flask import Flask, render_template, request, abort
 
 from src.perform_rag import RagSearch
 from src.load_dataset import LoadAndVectorizeData
@@ -33,7 +35,7 @@ EMBED_MODEL: str = os.environ.get(
     "EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2"
 )
 MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-1.5B")
-
+#/home/yiannisparask/Projects/Personal-Cheat-Sheets
 
 # ---------------------------------------------------------------------------
 # Flask app factory (simple singleton pattern here)
@@ -46,30 +48,87 @@ app = Flask(
 
 
 # ---------------------------------------------------------------------------
-# RAG initialization (performed at import; heavy models could optionally be
-# lazy-loaded on first request to reduce cold-start time).
+# Lazy RAG pipeline globals (initialized only after DB creation or first need)
 # ---------------------------------------------------------------------------
-rag = RagSearch(milvus_uri=MILVUS_URI, device=DEVICE, collection_name=COLLECTION_NAME)
-embeddings = rag.get_embeddings_model(EMBED_MODEL)
-retriever = rag.get_retriever()
-prompt = rag.build_prompt_template()
-llm = rag.get_hg_llm(MODEL_NAME)
-qa_chain = rag.get_qa_chain(retriever, prompt)
+rag_lock: Lock = Lock()
+rag: RagSearch | None = None
+embeddings = None
+retriever = None
+prompt = None
+llm = None
+qa_chain = None
+NOT_READY_MESSAGE: str = (
+    "Vector database not initialized. Open settings (⚙️) and create it by supplying a markdown folder path."
+)
+
+
+def build_rag_pipeline(force: bool = False) -> bool:
+    """Build or rebuild the RAG pipeline lazily.
+
+    This avoids loading models or opening Milvus until data has been ingested.
+
+    Args:
+        force (bool): Force rebuild even if already initialized.
+
+    Returns:
+        bool: True if pipeline ready; False otherwise.
+    """
+    global rag, embeddings, retriever, prompt, llm, qa_chain  # noqa: PLW0603
+
+    if not force and qa_chain is not None:
+        return True
+
+    # If using local Milvus Lite file path, skip initialization until file exists.
+    if not (MILVUS_URI.startswith("http://") or MILVUS_URI.startswith("https://")):
+        if not os.path.exists(MILVUS_URI):  # DB file not yet created via ingestion
+            return False
+
+    try:
+        local_rag = RagSearch(
+            milvus_uri=MILVUS_URI, device=DEVICE, collection_name=COLLECTION_NAME
+        )
+        local_embeddings = local_rag.get_embeddings_model(EMBED_MODEL)
+        local_retriever = local_rag.get_retriever()
+        local_prompt = local_rag.build_prompt_template()
+        local_llm = local_rag.get_hg_llm(MODEL_NAME)
+        local_qa_chain = local_rag.get_qa_chain(local_retriever, local_prompt)
+
+        rag = local_rag
+        embeddings = local_embeddings
+        retriever = local_retriever
+        prompt = local_prompt
+        llm = local_llm
+        qa_chain = local_qa_chain
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[RAG INIT] Delayed (will retry later): {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 def run_rag_query(message: str) -> str:
-    """Execute a RAG query and return the answer text."""
-    answer = rag.perform_rag_query(qa_chain, message)
-    return answer
+    """Execute a RAG query.
+
+    If vector DB not yet initialized, return guidance instead of raising.
+    """
+    ready = build_rag_pipeline()
+    if not ready or qa_chain is None or rag is None:
+        return NOT_READY_MESSAGE
+    return cast(str, rag.perform_rag_query(qa_chain, message))
 
 
 def build_milvus_collection(data_path: str) -> int:
-    """Ingest PDFs from data_path and (re)build Milvus collection.
+    """Ingest markdown documents from a directory and create/update Milvus collection.
 
-    Returns the number of chunks inserted.
+    After ingestion, force a rebuild of the pipeline so queries work immediately.
+
+    Args:
+        data_path (str): Directory containing markdown files.
+
+    Returns:
+        int: Number of chunks inserted.
     """
     loader = LoadAndVectorizeData(
         data_path=data_path,
@@ -81,6 +140,10 @@ def build_milvus_collection(data_path: str) -> int:
     chunks = loader.split_docs(docs)
     embeddings_model = loader.get_embeddings_model(EMBED_MODEL)
     loader.save_to_milvus(chunks, embeddings_model)
+
+    # Force rebuild of RAG pipeline now that vectors exist.
+    with rag_lock:
+        build_rag_pipeline(force=True)
     return len(chunks)
 
 
@@ -89,8 +152,9 @@ def build_milvus_collection(data_path: str) -> int:
 # ---------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index() -> str:
-    """Render the main chat page."""
-    return render_template("index.html")
+    """Render the main chat page with readiness flag."""
+    db_ready = build_rag_pipeline()  # Attempt lazy init (no-op if not created yet)
+    return render_template("index.html", db_ready=db_ready)
 
 
 @app.route("/send", methods=["POST"])

@@ -10,6 +10,12 @@
     <div class="chat-container">
         <div class="chat-header">Smart Documentation Assistant</div>
 
+        {% if not db_ready %}
+        <div class="warning-banner" style="background:#fff3cd;color:#664d03;padding:8px 12px;border:1px solid #ffe69c;border-radius:4px;margin:8px 0;">
+            No vector database initialized yet. Use ⚙️ to create it.
+        </div>
+        {% endif %}
+
         <div id="chatbox" class="chat-box">
             <!-- server responses and user messages will be appended here -->
         </div>
@@ -42,13 +48,3 @@
     </div>
 </body>
 </html>
-
-<div class="create-db-fragment">
-    {% if status == "success" %}
-    <div class="ok">Imported {{ count }} chunks from <code>{{ data_path }}</code> into Milvus at
-        <code>{{ milvus_uri }}</code>.</div>
-    {% else %}
-    <div class="error">Failed to create DB from <code>{{ data_path }}</code> into
-        <code>{{ milvus_uri }}</code>.<br>Error: {{ error }}</div>
-    {% endif %}
-</div>
