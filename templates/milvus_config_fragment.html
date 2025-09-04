@@ -1,0 +1,9 @@
+{% if status == 'success' and ready %}
+<div class="milvus-config-ok">Connected to Milvus at <code>{{ milvus_uri }}</code>, collection <code>{{ collection_name }}</code>.</div>
+{% elif status == 'success' and not ready %}
+<div class="milvus-config-warn">Milvus set to <code>{{ milvus_uri }}</code> / <code>{{ collection_name }}</code> but collection appears empty (ingest documents next).</div>
+{% elif status == 'pending' %}
+<div class="milvus-config-pending">Configuration saved. Initializing...</div>
+{% elif status == 'error' %}
+<div class="milvus-config-error">Config error: {{ error }}</div>
+{% endif %}

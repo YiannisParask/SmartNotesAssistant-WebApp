@@ -1,0 +1,1 @@
+Chat Template: https://mdbootstrap.com/docs/standard/extended/chat/

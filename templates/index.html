@@ -1,50 +1,82 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <meta charset="utf-8" />
+    <meta charset="utf-8">
     <title>Smart Docs Assistant</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {{ bootstrap.load_css() }}
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <script src="https://unpkg.com/htmx.org@1.10.0"></script>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .chat-card-body { height: 420px; overflow-y: auto; }
+        .chat-msg-user   { background: var(--bs-primary); color: #fff; }
+        .chat-msg-bot    { background: var(--bs-tertiary-bg); }
+        .chat-bubble { max-width: 75%; }
+        #chat-body .row + .row { margin-top: .35rem; }
+        body.htmx-busy { cursor: progress; }
+    </style>
 </head>
-<body>
-    <div class="chat-container">
-        <div class="chat-header">Smart Documentation Assistant</div>
-
-        {% if not db_ready %}
-        <div class="warning-banner" style="background:#fff3cd;color:#664d03;padding:8px 12px;border:1px solid #ffe69c;border-radius:4px;margin:8px 0;">
-            No vector database initialized yet. Use ⚙️ to create it.
-        </div>
-        {% endif %}
-
-        <div id="chatbox" class="chat-box">
-            <!-- server responses and user messages will be appended here -->
-        </div>
-
-        <!-- wrapper keeps settings next to the chat form without nesting forms -->
-        <div class="chat-input-area-wrapper" style="display:flex;align-items:center;gap:8px;">
-            <!-- Settings control -->
-            <details class="settings-toggle" role="group" aria-label="">
-                <summary class="settings-button" title="Settings">⚙️</summary>
-
-                <!-- DB creation form -->
-                <div class="settings-panel">
-                    <form hx-post="/create_db" hx-target="#db-status" hx-swap="innerHTML" class="db-form">
-                        <label class="sr-only">Data path</label>
-                        <input type="text" name="data_path" placeholder="/path/to/data" required>
-                        <button type="submit">Create / Update DB</button>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <span class="navbar-brand mx-auto">Smart Docs Assistant</span>
+    </div>
+ </nav>
+<main class="container py-4">
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-7">
+            <div class="card shadow-sm" id="chat-card">
+                <div class="card-header py-3 d-flex flex-wrap gap-2 align-items-center">
+                    <h5 class="mb-0 me-auto">Chat</h5>
+                    <form class="d-flex align-items-center gap-2" hx-post="/configure_milvus" hx-target="#milvus-config-status" hx-swap="innerHTML">
+                        <input class="form-control form-control-sm" style="min-width:240px" name="milvus_uri" placeholder="Milvus URI" value="{{ milvus_uri }}" required>
+                        <input class="form-control form-control-sm" style="min-width:160px" name="collection_name" placeholder="Collection" value="{{ collection_name }}" required>
+                        <button class="btn btn-sm btn-outline-primary" type="submit">Connect</button>
                     </form>
-                    <div id="db-status" class="db-status"></div>
                 </div>
-            </details>
+                <div id="milvus-config-status" class="px-3 pt-2"></div>
 
-            <!-- Chat form remains standalone -->
-            <form id="chat-form" class="chat-input-area" hx-post="/send" hx-target="#chatbox" hx-swap="beforeend"
-                style="flex:1;display:flex;gap:8px;align-items:center;">
-                <input type="text" name="message" id="input" placeholder="Type a message..." autocomplete="off"
-                    class="chat-input" required style="flex:1;">
-                <button type="submit" class="send-btn">&#8593;</button>
-            </form>
+                {% if not milvus_configured %}
+                    <div class="alert alert-warning mx-3 mt-2 mb-0" role="alert">
+                        Provide Milvus connection details to enable retrieval.
+                    </div>
+                {% elif not db_ready %}
+                    <div class="alert alert-info mx-3 mt-2 mb-0" role="alert">
+                        Connected. Collection contents will be used when available.
+                    </div>
+                {% endif %}
+
+                <div id="chat-body" class="card-body chat-card-body">
+                    <!-- Messages appended here -->
+                </div>
+                <div class="card-footer bg-body-tertiary">
+                    <form id="chat-form" hx-post="/send" hx-target="#chat-body" hx-swap="beforeend" class="d-flex gap-2 align-items-end">
+                        <div class="flex-grow-1">
+                            <label for="chat-input" class="visually-hidden">Message</label>
+                            <textarea id="chat-input" name="message" class="form-control" rows="1" placeholder="Type a message..." required oninput="this.style.height='auto';this.style.height=(this.scrollHeight)+'px';"></textarea>
+                        </div>
+                        <button class="btn btn-primary" type="submit">
+                            <span class="d-none d-sm-inline">Send</span>
+                            <i class="bi bi-send-fill"></i>
+                        </button>
+                    </form>
+                </div>
+            </div>
         </div>
     </div>
+</main>
+{{ bootstrap.load_js() }}
+<script>
+// Auto-scroll chat body after new messages
+document.addEventListener('htmx:afterSwap', (e) => {
+    if (e.detail && e.detail.target && e.detail.target.id === 'chat-body') {
+        const el = e.detail.target; el.scrollTop = el.scrollHeight;
+    }
+});
+// Simple visual request state
+document.addEventListener('htmx:request', () => document.body.classList.add('htmx-busy'));
+document.addEventListener('htmx:afterRequest', () => document.body.classList.remove('htmx-busy'));
+</script>
 </body>
 </html>

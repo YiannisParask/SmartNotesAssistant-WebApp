@@ -1,10 +1,4 @@
 """Flask application entry-point for SmartDocsAssistant.
-
-This refactors the previous FastAPI implementation to Flask while keeping:
- - RAG pipeline initialization (Milvus + HuggingFace models)
- - htmx-driven endpoints for chat (/send) and dataset ingestion (/create_db)
- - Jinja2 templates & static file serving
-
 Run with:
     python main.py
 or (production example):
@@ -12,43 +6,42 @@ or (production example):
 """
 
 from __future__ import annotations
-
 import os
 from threading import Lock
 from typing import cast
-
+from flask_bootstrap import Bootstrap5
 import torch
 from flask import Flask, render_template, request, abort
-
 from src.perform_rag import RagSearch
-from src.load_dataset import LoadAndVectorizeData
 
 
 # ---------------------------------------------------------------------------
-# Configuration constants
+# Configuration & mutable runtime state
 # ---------------------------------------------------------------------------
 BASE_DIR: str = os.path.abspath(os.path.dirname(__file__))
-MILVUS_URI: str = os.environ.get("MILVUS_URI", os.path.join(BASE_DIR, "milvus_demo.db"))
-COLLECTION_NAME: str = os.environ.get("MILVUS_COLLECTION", "MilvusDocs")
+# Device / models (can still be overridden by env)
 DEVICE: str = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-EMBED_MODEL: str = os.environ.get(
-    "EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2"
-)
+EMBED_MODEL: str = os.environ.get("EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2")
 MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-1.5B")
-#/home/yiannisparask/Projects/Personal-Cheat-Sheets
+
+# Remote Milvus connection (required). Start empty unless env provides.
+current_milvus_uri: str | None = os.environ.get("MILVUS_URI") or None
+current_collection_name: str | None = os.environ.get("MILVUS_COLLECTION") or None
+
 
 # ---------------------------------------------------------------------------
-# Flask app factory (simple singleton pattern here)
+# Flask app factory
 # ---------------------------------------------------------------------------
 app = Flask(
     __name__,
     static_folder="static",
     template_folder="templates",
 )
-
+app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB limit for archives
+bootstrap = Bootstrap5(app)
 
 # ---------------------------------------------------------------------------
-# Lazy RAG pipeline globals (initialized only after DB creation or first need)
+# Lazy RAG pipeline globals
 # ---------------------------------------------------------------------------
 rag_lock: Lock = Lock()
 rag: RagSearch | None = None
@@ -58,34 +51,36 @@ prompt = None
 llm = None
 qa_chain = None
 NOT_READY_MESSAGE: str = (
-    "Vector database not initialized. Open settings (⚙️) and create it by supplying a markdown folder path."
+    "Milvus not configured or collection empty. Provide the Milvus URI and Collection above. Ensure the collection already contains embeddings."
 )
 
 
+def _milvus_configured() -> bool:
+    """Return True if user has supplied remote Milvus URI & collection name."""
+    return bool(current_milvus_uri and current_collection_name)
+
+
 def build_rag_pipeline(force: bool = False) -> bool:
-    """Build or rebuild the RAG pipeline lazily.
+    """Build or rebuild the RAG pipeline lazily if Milvus config present.
 
-    This avoids loading models or opening Milvus until data has been ingested.
-
-    Args:
-        force (bool): Force rebuild even if already initialized.
-
-    Returns:
-        bool: True if pipeline ready; False otherwise.
+    Avoids loading models or opening Milvus until data exists & config supplied.
     """
     global rag, embeddings, retriever, prompt, llm, qa_chain  # noqa: PLW0603
+
+    if not _milvus_configured():
+        return False
 
     if not force and qa_chain is not None:
         return True
 
-    # If using local Milvus Lite file path, skip initialization until file exists.
-    if not (MILVUS_URI.startswith("http://") or MILVUS_URI.startswith("https://")):
-        if not os.path.exists(MILVUS_URI):  # DB file not yet created via ingestion
-            return False
-
     try:
+        assert current_milvus_uri is not None and current_collection_name is not None
+        uri: str = current_milvus_uri  # cast after assert
+        coll: str = current_collection_name
         local_rag = RagSearch(
-            milvus_uri=MILVUS_URI, device=DEVICE, collection_name=COLLECTION_NAME
+            milvus_uri=uri,
+            device=DEVICE,
+            collection_name=coll,
         )
         local_embeddings = local_rag.get_embeddings_model(EMBED_MODEL)
         local_retriever = local_rag.get_retriever()
@@ -109,42 +104,11 @@ def build_rag_pipeline(force: bool = False) -> bool:
 # Utility helpers
 # ---------------------------------------------------------------------------
 def run_rag_query(message: str) -> str:
-    """Execute a RAG query.
-
-    If vector DB not yet initialized, return guidance instead of raising.
-    """
+    """Execute a RAG query or return guidance if not ready."""
     ready = build_rag_pipeline()
     if not ready or qa_chain is None or rag is None:
         return NOT_READY_MESSAGE
     return cast(str, rag.perform_rag_query(qa_chain, message))
-
-
-def build_milvus_collection(data_path: str) -> int:
-    """Ingest markdown documents from a directory and create/update Milvus collection.
-
-    After ingestion, force a rebuild of the pipeline so queries work immediately.
-
-    Args:
-        data_path (str): Directory containing markdown files.
-
-    Returns:
-        int: Number of chunks inserted.
-    """
-    loader = LoadAndVectorizeData(
-        data_path=data_path,
-        collection_name=COLLECTION_NAME,
-        device=DEVICE,
-        milvus_uri=MILVUS_URI,
-    )
-    docs = loader.load_md_data()
-    chunks = loader.split_docs(docs)
-    embeddings_model = loader.get_embeddings_model(EMBED_MODEL)
-    loader.save_to_milvus(chunks, embeddings_model)
-
-    # Force rebuild of RAG pipeline now that vectors exist.
-    with rag_lock:
-        build_rag_pipeline(force=True)
-    return len(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +116,16 @@ def build_milvus_collection(data_path: str) -> int:
 # ---------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index() -> str:
-    """Render the main chat page with readiness flag."""
-    db_ready = build_rag_pipeline()  # Attempt lazy init (no-op if not created yet)
-    return render_template("index.html", db_ready=db_ready)
+    """Render main chat page with flags for configuration & readiness."""
+    db_ready = build_rag_pipeline()  # Attempt lazy init if config present
+    milvus_configured = _milvus_configured()
+    return render_template(
+        "index.html",
+        db_ready=db_ready,
+        milvus_configured=milvus_configured,
+        milvus_uri=current_milvus_uri or "",
+        collection_name=current_collection_name or "",
+    )
 
 
 @app.route("/send", methods=["POST"])
@@ -171,50 +142,7 @@ def send() -> str:
     return render_template("message_fragment.html", user=message, server=answer)
 
 
-@app.route("/create_db", methods=["POST"])
-def create_db() -> str:
-    """Ingest PDFs and rebuild Milvus collection. Returns status fragment.
-
-    Heavy work runs in a background thread; we immediately return a 'started'
-    state and rely on htmx polling (future enhancement) or a second click.
-    For simplicity here we block until completion (synchronous).
-    """
-    raw_path = request.form.get("data_path")
-    if not raw_path:
-        abort(400, "Missing data_path")
-    data_path = cast(str, raw_path)
-
-    # Basic server-side validation
-    if not os.path.isdir(data_path):
-        return render_template(
-            "create_db_fragment.html",
-            status="error",
-            error=f"Path not found: {data_path}",
-            data_path=data_path,
-            milvus_uri=MILVUS_URI,
-        )
-
-    try:
-        count = build_milvus_collection(data_path)
-        return render_template(
-            "create_db_fragment.html",
-            status="success",
-            count=count,
-            data_path=data_path,
-            milvus_uri=MILVUS_URI,
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        return render_template(
-            "create_db_fragment.html",
-            status="error",
-            error=str(exc),
-            data_path=data_path,
-            milvus_uri=MILVUS_URI,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Graceful teardown / GPU memory cleanup hook (Flask variant)
+## /create_db endpoint removed: application expects existing remote Milvus collection.
 # ---------------------------------------------------------------------------
 @app.teardown_appcontext
 def _teardown(_exception):  # type: ignore[unused-argument]
@@ -224,6 +152,52 @@ def _teardown(_exception):  # type: ignore[unused-argument]
             torch.cuda.ipc_collect()
         except Exception:  # pragma: no cover
             pass
+
+
+# ---------------------------------------------------------------------------
+# Milvus remote configuration route
+# ---------------------------------------------------------------------------
+@app.route("/configure_milvus", methods=["POST"])
+def configure_milvus() -> str:
+    """Store Milvus URI & collection name; attempt immediate pipeline init."""
+    uri = (request.form.get("milvus_uri") or "").strip()
+    collection = (request.form.get("collection_name") or "").strip()
+
+    if not uri or not collection:
+        return render_template(
+            "milvus_config_fragment.html",
+            status="error",
+            error="Both URI and Collection are required.",
+            milvus_uri=uri,
+            collection_name=collection,
+        )
+
+    # Basic sanity check for remote URI (Milvus stand-alone typical: http://host:19530)
+    if not (uri.startswith("http://") or uri.startswith("https://")):
+        return render_template(
+            "milvus_config_fragment.html",
+            status="error",
+            error="URI should start with http:// or https://",
+            milvus_uri=uri,
+            collection_name=collection,
+        )
+
+    global current_milvus_uri, current_collection_name, rag, embeddings, retriever, prompt, llm, qa_chain
+
+    # Reset pipeline state so lazy builder re-initializes with new settings.
+    current_milvus_uri = uri
+    current_collection_name = collection
+    rag = None
+    embeddings = retriever = prompt = llm = qa_chain = None
+
+    ready = build_rag_pipeline(force=True)
+    return render_template(
+        "milvus_config_fragment.html",
+        status="success" if ready else "pending",
+        milvus_uri=uri,
+        collection_name=collection,
+        ready=ready,
+    )
 
 
 # ---------------------------------------------------------------------------
