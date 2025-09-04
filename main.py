@@ -19,7 +19,6 @@ from src.perform_rag import RagSearch
 # Configuration & mutable runtime state
 # ---------------------------------------------------------------------------
 BASE_DIR: str = os.path.abspath(os.path.dirname(__file__))
-# Device / models (can still be overridden by env)
 DEVICE: str = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 EMBED_MODEL: str = os.environ.get("EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2")
 MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-1.5B")
@@ -37,7 +36,6 @@ app = Flask(
     static_folder="static",
     template_folder="templates",
 )
-app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB limit for archives
 bootstrap = Bootstrap5(app)
 
 # ---------------------------------------------------------------------------
@@ -95,7 +93,7 @@ def build_rag_pipeline(force: bool = False) -> bool:
         llm = local_llm
         qa_chain = local_qa_chain
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[RAG INIT] Delayed (will retry later): {exc}")
         return False
 
@@ -136,8 +134,6 @@ def send() -> str:
         abort(400, "Missing message")
     message = cast(str, raw_message)
 
-    # For now run inline (blocking). For better responsiveness you could
-    # offload to a thread pool and stream partial output (SSE) later.
     answer = run_rag_query(message)
     return render_template("message_fragment.html", user=message, server=answer)
 
@@ -145,12 +141,12 @@ def send() -> str:
 ## /create_db endpoint removed: application expects existing remote Milvus collection.
 # ---------------------------------------------------------------------------
 @app.teardown_appcontext
-def _teardown(_exception):  # type: ignore[unused-argument]
+def _teardown(_exception):
     if torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-        except Exception:  # pragma: no cover
+        except Exception:
             pass
 
 
