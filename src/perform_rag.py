@@ -126,6 +126,3 @@ class RagSearch:
             answer = answer_full.split("### Answer:", 1)[-1].strip()
 
         return answer
-
-
-"""RAG retrieval and generation utilities (cleaned of unused demo code)."""
